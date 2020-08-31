@@ -79,27 +79,28 @@ def run_sniffer():
     try:
         if len(sys.argv) != 2:
             print("Please enter an interface to sniff packets on")
-            sys.exit()
+            return
 
         # socket.ntohs(0x0003) allows to capture from tcp, udp, etc..
         socket_lock.acquire()
         s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
         s.bind((sys.argv[1], 0))
-        socket_lock.release()
 
     except socket.error as err:
         print("Socket could not be created. Error Code :", err)
-        sys.exit()
+        return
     except Exception as err:
         print("Error: ", err)
-        sys.exit()
+        return
+    finally:
+        socket_lock.release()
 
     # Create a thread to print out number of incoming packets
     try:
         _thread.start_new_thread(print_received_packet_info, (PRINT_DELAY_SEC,))
     except Exception as err:
         print("Error unable to start thread:", err)
-        sys.exit()
+        return
 
     try:
         while True:
@@ -177,6 +178,7 @@ def main():
     # once non daemon threads are gone the program exits
     _thread.start_new_thread(
         run_sniffer,
+        ()
     )
     while input("To exit program type 'exit':\n") != "exit":
         continue

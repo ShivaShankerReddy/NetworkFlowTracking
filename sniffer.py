@@ -134,7 +134,6 @@ def run_sniffer():
         # socket.ntohs(0x0003) allows to capture from tcp, udp, etc..
         s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
         s.bind((sys.argv[1], 0))
-        #0 is stdin
         inputs = [s]
         readable_data, writable_data, err_data = select.select(inputs, [], inputs, 10)
 

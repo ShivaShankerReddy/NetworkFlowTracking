@@ -18,8 +18,6 @@
 # Every 10 seconds, prints the counts of each packet flow
 # to standard out in a human-readable form
 
-# Create a raw socket
-
 import socket
 import sys
 import fcntl

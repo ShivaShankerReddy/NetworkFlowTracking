@@ -25,7 +25,7 @@ import sys
 import fcntl
 import struct
 import time
-import _thread
+import select
 from collections import Counter
 
 # Constants
@@ -54,25 +54,75 @@ def get_protocol_name_by_num(p_num):
     return name
 
 
-def print_packet_list(title, p_list):
-    print(title)
-    if len(p_list) == 0:
+def print_received_packet_info(packet_counter):
+    print("Packets:")
+    if len(packet_counter) == 0:
         print("None")
     else:
-        for item in p_list.keys():
-            print(item, "=>", p_list[item])
+        for item in packet_counter.keys():
+            print(item, "=>", packet_counter[item])
+    print("\n")
 
-
-def print_received_packet_info(delay):
-    print("Format: \nProtocol Source:port->Destination:port => num_packets\n")
-    while True:
-        time.sleep(delay)
-        packet_list_lock.acquire()
-        packet_counter = Counter(PACKET_LIST)
-        PACKET_LIST.clear()
-        packet_list_lock.release()
-        print_packet_list("Packets:", packet_counter)
-
+def process_recv_packet(s):
+    # packet_data, address = s.recvfrom(65565)
+    packet_data = s.recvfrom(65565)[0]
+    # unpack the ethernet portion
+    eth_header = struct.unpack(ETH_UNPACK_FORMAT, packet_data[0:ETH_HEADER_LEN])
+    eth_type = socket.ntohs(eth_header[2])
+    if eth_type != IPV4_NUMBER:
+        return
+    # unpack ip portion
+    ip_header = struct.unpack(
+        IP_UNPACK_FORMAT,
+        packet_data[ETH_HEADER_LEN : ETH_HEADER_LEN + IP_HEADER_LEN_MIN],
+    )
+    # version is first 4 bits so if we bit shift 4 bits we ge the value
+    # version = ip_header[0] >> 4
+    # head len is next 4 bits so if we & with 0b00001111 we will get len
+    ip_header_len = (ip_header[0] & 0xF) * 4
+    protocol_num = ip_header[6]
+    protocol_str = get_protocol_name_by_num(protocol_num)
+    source_addr = socket.inet_ntoa(ip_header[8])
+    dest_addr = socket.inet_ntoa(ip_header[9])
+    if protocol_num == TCP_NUMBER:
+        # unpack tcp portion
+        tcp_header_index = ETH_HEADER_LEN + ip_header_len
+        tcp_header = struct.unpack(
+            TCP_UNPACK_FORMAT,
+            packet_data[
+                tcp_header_index : tcp_header_index + TCP_HEADER_LEN_MIN
+            ],
+        )
+        source_port = tcp_header[0]
+        dest_port = tcp_header[1]
+    elif protocol_num == UDP_NUMBER:
+        # unpack udp portion
+        udp_header_index = ETH_HEADER_LEN + ip_header_len
+        udp_header = struct.unpack(
+            UDP_UNPACK_FORMAT,
+            packet_data[udp_header_index : udp_header_index + UDP_HEADER_LEN],
+        )
+        source_port = udp_header[0]
+        dest_port = udp_header[1]
+    # Filter data into respective lists
+    if protocol_num == TCP_NUMBER or protocol_num == UDP_NUMBER:
+        packet_counter.update(
+            [
+                protocol_str
+                + " "
+                + str(source_addr)
+                + ":"
+                + str(source_port)
+                + "->"
+                + str(dest_addr)
+                + ":"
+                + str(dest_port)
+            ]
+        )
+    else:
+        packet_counter.update(
+            [protocol_str + " " + str(source_addr) + "->" + str(dest_addr)]
+        )
 
 def run_sniffer():
     global s
@@ -82,9 +132,11 @@ def run_sniffer():
             return
 
         # socket.ntohs(0x0003) allows to capture from tcp, udp, etc..
-        socket_lock.acquire()
         s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
         s.bind((sys.argv[1], 0))
+        #0 is stdin
+        inputs = [s]
+        readable_data, writable_data, err_data = select.select(inputs, [], inputs, 10)
 
     except socket.error as err:
         print("Socket could not be created. Error Code :", err)
@@ -92,107 +144,42 @@ def run_sniffer():
     except Exception as err:
         print("Error: ", err)
         return
-    finally:
-        socket_lock.release()
 
-    # Create a thread to print out number of incoming packets
+    print("Type 'exit' to exit program.")
+    print("Format: \nProtocol Source:port->Destination:port => num_packets\n")
+    continue_condition = True
+    deadline = time.time() + PRINT_DELAY_SEC
     try:
-        _thread.start_new_thread(print_received_packet_info, (PRINT_DELAY_SEC,))
+        while continue_condition:
+            if(time.time() >= deadline):
+                print_received_packet_info(packet_counter)
+                deadline = time.time() + PRINT_DELAY_SEC
+
+            if select.select([sys.stdin,],[],[],0.0)[0] and input() == "exit":
+                continue_condition = False
+
+            for file_desc in readable_data:
+                if(file_desc == s) :
+                    process_recv_packet(s)
+
+            if len(err_data) > 0 :
+                continue_condition = False
+            
+
     except Exception as err:
-        print("Error unable to start thread:", err)
-        return
-
-    try:
-        while True:
-            # packet_data, address = s.recvfrom(65565)
-            packet_data = s.recvfrom(65565)[0]
-
-            # unpack the ethernet portion
-            eth_header = struct.unpack(ETH_UNPACK_FORMAT, packet_data[0:ETH_HEADER_LEN])
-
-            eth_type = socket.ntohs(eth_header[2])
-            if eth_type != IPV4_NUMBER:
-                continue
-
-            # unpack ip portion
-            ip_header = struct.unpack(
-                IP_UNPACK_FORMAT,
-                packet_data[ETH_HEADER_LEN : ETH_HEADER_LEN + IP_HEADER_LEN_MIN],
-            )
-            # version is first 4 bits so if we bit shift 4 bits we ge the value
-            # version = ip_header[0] >> 4
-            # head len is next 4 bits so if we & with 0b00001111 we will get len
-            ip_header_len = (ip_header[0] & 0xF) * 4
-
-            protocol_num = ip_header[6]
-            protocol_str = get_protocol_name_by_num(protocol_num)
-            source_addr = socket.inet_ntoa(ip_header[8])
-            dest_addr = socket.inet_ntoa(ip_header[9])
-
-            if protocol_num == TCP_NUMBER:
-                # unpack tcp portion
-                tcp_header_index = ETH_HEADER_LEN + ip_header_len
-                tcp_header = struct.unpack(
-                    TCP_UNPACK_FORMAT,
-                    packet_data[
-                        tcp_header_index : tcp_header_index + TCP_HEADER_LEN_MIN
-                    ],
-                )
-                source_port = tcp_header[0]
-                dest_port = tcp_header[1]
-            elif protocol_num == UDP_NUMBER:
-                # unpack udp portion
-                udp_header_index = ETH_HEADER_LEN + ip_header_len
-                udp_header = struct.unpack(
-                    UDP_UNPACK_FORMAT,
-                    packet_data[udp_header_index : udp_header_index + UDP_HEADER_LEN],
-                )
-                source_port = udp_header[0]
-                dest_port = udp_header[1]
-
-            # Filter data into respective lists
-            packet_list_lock.acquire()
-            if protocol_num == TCP_NUMBER or protocol_num == UDP_NUMBER:
-                PACKET_LIST.append(
-                    protocol_str
-                    + " "
-                    + str(source_addr)
-                    + ":"
-                    + str(source_port)
-                    + "->"
-                    + str(dest_addr)
-                    + ":"
-                    + str(dest_port)
-                )
-            else:
-                PACKET_LIST.append(
-                    protocol_str + " " + str(source_addr) + "->" + str(dest_addr)
-                )
-            packet_list_lock.release()
-    except Exception:
-        print("exit was received from main thread")
-
+        print("Error: ", err)
+    # close socket
+    try: 
+        print("Closing socket")
+        socket.close(s.fileno())
+    except:
+        print("Error closing socket")
 
 def main():
-    # child threads are default daemon threads
-    # once non daemon threads are gone the program exits
-    _thread.start_new_thread(
-        run_sniffer,
-        ()
-    )
-    while input("To exit program type 'exit':\n") != "exit":
-        continue
-    try:
-        socket_lock.acquire()
-        socket.close(s.fileno())
-        socket_lock.release()
-    except Exception:
-        print("Socket already closed")
-    print("Exiting program")
+    run_sniffer()
+
 
 if __name__ == "__main__":
     s = -1
-    PACKET_LIST = []
-    packet_list_lock = _thread.allocate_lock()
-    socket_lock = _thread.allocate_lock()
+    packet_counter = Counter()
     main()
